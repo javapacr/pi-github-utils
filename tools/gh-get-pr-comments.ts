@@ -191,7 +191,7 @@ export interface CommentEntry {
 export interface GetPrCommentsDetails {
 	pr_id: number;
 	status: string;
-	kind: CommentKindParam;
+	kind: string;
 	repo?: string;
 	file_path?: string;
 	count?: number;
@@ -485,7 +485,7 @@ export function registerGhGetPrCommentsTool(pi: ExtensionAPI): void {
 				"tmp",
 				"gh",
 				"pr-comments",
-				`${slug}.json`,
+				`${slug}.jsonl`,
 			);
 			await writeJsonl(filePath, entries);
 

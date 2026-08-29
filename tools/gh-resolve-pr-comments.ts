@@ -103,14 +103,50 @@ export interface ResolvePrCommentsDetails {
 	errors: number;
 	resolved_count: number;
 	replied_count: number;
+	skipped_malformed?: string[];
 	results?: ResolutionResult[];
 	error?: string;
 }
 
-async function readJsonl(filePath: string): Promise<CommentEntry[]> {
+interface JsonlReadResult {
+	entries: CommentEntry[];
+	/** Human-readable reasons for lines that were skipped (parse or type errors). */
+	malformed: string[];
+}
+
+async function readJsonl(filePath: string): Promise<JsonlReadResult> {
 	const raw = await readFile(filePath, "utf8");
 	const lines = raw.split("\n").filter((l) => l.trim());
-	return lines.map((line) => JSON.parse(line) as CommentEntry);
+	const entries: CommentEntry[] = [];
+	const malformed: string[] = [];
+	lines.forEach((line, index) => {
+		const lineNo = index + 1;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(line);
+		} catch {
+			malformed.push(`line ${lineNo}: not valid JSON`);
+			return;
+		}
+		if (typeof parsed !== "object" || parsed === null) {
+			malformed.push(`line ${lineNo}: not a JSON object`);
+			return;
+		}
+		const row = parsed as Record<string, unknown>;
+		if (row.notes !== undefined && typeof row.notes !== "string") {
+			malformed.push(`line ${lineNo}: 'notes' must be a string`);
+			return;
+		}
+		for (const field of ["thread_id", "subject_id"] as const) {
+			const value = row[field];
+			if (value !== undefined && value !== null && typeof value !== "string") {
+				malformed.push(`line ${lineNo}: '${field}' must be a string or null`);
+				return;
+			}
+		}
+		entries.push(row as unknown as CommentEntry);
+	});
+	return { entries, malformed };
 }
 
 async function addReply(
@@ -153,62 +189,60 @@ function buildPrReplyBody(entry: CommentEntry, notes: string): string {
 	return `> replying to @${entry.commenter}'s comment (${entry.url ?? "see comment"})\n\n${notes}`;
 }
 
-function processEntry(
+async function processEntry(
 	entry: CommentEntry,
 	cwd: string,
 ): Promise<ResolutionResult> {
-	return (async () => {
-		const kind: CommentKind = entry.kind ?? "inline";
-		const result: ResolutionResult = {
-			kind,
-			thread_id: entry.thread_id,
-			comment_id: entry.comment_id,
-			path: entry.path,
-			line: entry.line,
-			replied: false,
-			resolved: false,
-		};
+	const kind: CommentKind = entry.kind ?? "inline";
+	const result: ResolutionResult = {
+		kind,
+		thread_id: entry.thread_id,
+		comment_id: entry.comment_id,
+		path: entry.path,
+		line: entry.line,
+		replied: false,
+		resolved: false,
+	};
 
-		const notes = entry.notes?.trim() ?? "";
-		if (!notes) return result;
+	const notes = entry.notes?.trim() ?? "";
+	if (!notes) return result;
 
-		if (kind === "pr") {
-			if (!entry.subject_id) {
-				result.error =
-					"PR row is missing subject_id (PR node id); cannot post reply";
-				return result;
-			}
-			const body = buildPrReplyBody(entry, notes);
-			const replyResult = await addPrComment(entry.subject_id, body, cwd);
-			if (!replyResult.ok) {
-				result.error = `Reply failed: ${replyResult.error}`;
-				return result;
-			}
-			result.replied = true;
+	if (kind === "pr") {
+		if (!entry.subject_id) {
+			result.error =
+				"PR row is missing subject_id (PR node id); cannot post reply";
 			return result;
 		}
-
-		if (!entry.thread_id) {
-			result.error = "Inline row is missing thread_id; cannot reply/resolve";
-			return result;
-		}
-
-		const replyResult = await addReply(entry.thread_id, notes, cwd);
+		const body = buildPrReplyBody(entry, notes);
+		const replyResult = await addPrComment(entry.subject_id, body, cwd);
 		if (!replyResult.ok) {
 			result.error = `Reply failed: ${replyResult.error}`;
 			return result;
 		}
 		result.replied = true;
-
-		const resolveResult = await resolveThread(entry.thread_id, cwd);
-		if (!resolveResult.ok) {
-			result.error = `Resolve failed: ${resolveResult.error}`;
-			return result;
-		}
-		result.resolved = true;
-
 		return result;
-	})();
+	}
+
+	if (!entry.thread_id) {
+		result.error = "Inline row is missing thread_id; cannot reply/resolve";
+		return result;
+	}
+
+	const replyResult = await addReply(entry.thread_id, notes, cwd);
+	if (!replyResult.ok) {
+		result.error = `Reply failed: ${replyResult.error}`;
+		return result;
+	}
+	result.replied = true;
+
+	const resolveResult = await resolveThread(entry.thread_id, cwd);
+	if (!resolveResult.ok) {
+		result.error = `Resolve failed: ${resolveResult.error}`;
+		return result;
+	}
+	result.resolved = true;
+
+	return result;
 }
 
 export function registerGhResolvePrCommentsTool(pi: ExtensionAPI): void {
@@ -247,7 +281,7 @@ export function registerGhResolvePrCommentsTool(pi: ExtensionAPI): void {
 			),
 		}),
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const cwd = (params.cwd as string | undefined) ?? ctx?.cwd ?? process.cwd();
 			const prId = params.pr_id as number;
 			const filePath = params.file as string;
@@ -277,9 +311,9 @@ export function registerGhResolvePrCommentsTool(pi: ExtensionAPI): void {
 			}
 			details.repo = `${repoResult.data.owner}/${repoResult.data.repo}`;
 
-			let entries: CommentEntry[];
+			let jsonl: JsonlReadResult;
 			try {
-				entries = await readJsonl(filePath);
+				jsonl = await readJsonl(filePath);
 			} catch (err: any) {
 				details.error = `Failed to read JSONL file: ${err.message}`;
 				return {
@@ -288,11 +322,20 @@ export function registerGhResolvePrCommentsTool(pi: ExtensionAPI): void {
 					details,
 				};
 			}
+			const entries = jsonl.entries;
+			if (jsonl.malformed.length > 0) {
+				details.skipped_malformed = jsonl.malformed;
+			}
 
 			const toProcess = entries.filter((e) => (e.notes?.trim() ?? "").length > 0);
 			const results: ResolutionResult[] = [];
-			for (const entry of toProcess) {
-				const result = await processEntry(entry, cwd);
+			let aborted = false;
+			for (let i = 0; i < toProcess.length; i++) {
+				if (signal?.aborted) {
+					aborted = true;
+					break;
+				}
+				const result = await processEntry(toProcess[i], cwd);
 				results.push(result);
 				if (result.error) {
 					details.errors += 1;
@@ -301,6 +344,15 @@ export function registerGhResolvePrCommentsTool(pi: ExtensionAPI): void {
 					if (result.resolved) details.resolved_count += 1;
 					if (result.replied && result.kind === "pr") details.replied_count += 1;
 				}
+				onUpdate?.({
+					content: [
+						{
+							type: "text",
+							text: `Processed ${i + 1}/${toProcess.length} rows`,
+						},
+					],
+					details,
+				});
 			}
 			details.results = results;
 
@@ -320,6 +372,12 @@ export function registerGhResolvePrCommentsTool(pi: ExtensionAPI): void {
 				`Resolved threads: ${details.resolved_count}`,
 				`Replied PR comments: ${details.replied_count}`,
 				`Errors: ${details.errors}`,
+				...(details.skipped_malformed
+					? [`Skipped ${details.skipped_malformed.length} malformed line(s)`]
+					: []),
+				...(aborted
+					? [`Aborted after ${results.length} row(s) — remaining rows unprocessed`]
+					: []),
 				...(errorLines.length > 0 ? ["", "Errors:", ...errorLines] : []),
 			];
 
