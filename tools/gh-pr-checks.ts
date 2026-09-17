@@ -2,8 +2,9 @@
  * gh_pr_checks — wait for and summarize GitHub PR check runs
  *
  * Runs `gh pr checks` for a pull request, optionally polling until all checks
- * complete. Writes a timestamped summary JSON file under the pi agent tmp
- * directory and returns a structured pass/fail summary.
+ * complete. The watch honors the turn abort signal: Esc cancels polling and
+ * returns the last known state. Writes a timestamped summary JSON file under
+ * the pi agent tmp directory and returns a structured pass/fail summary.
  */
 
 import { writeFile } from "node:fs/promises";
@@ -55,6 +56,7 @@ export interface PrChecksDetails {
 	log_file?: string;
 	summary?: CheckSummary;
 	timed_out?: boolean;
+	cancelled?: boolean;
 	error?: string;
 }
 
@@ -63,6 +65,15 @@ const BUCKET_FAIL = "fail";
 const BUCKET_PENDING = "pending";
 const BUCKET_SKIPPING = "skipping";
 const BUCKET_CANCEL = "cancel";
+
+const CANCELLED_NOTICE =
+	"Watch cancelled before completion (Esc/abort) — summary shows last known state.";
+
+const DEFAULT_TIMEOUT_SECONDS = 900;
+const MIN_TIMEOUT_SECONDS = 10;
+const MAX_TIMEOUT_SECONDS = 3600;
+const DEFAULT_INTERVAL_SECONDS = 30;
+const MIN_INTERVAL_SECONDS = 10;
 
 const FAILED_STATES = new Set([
 	"FAILURE",
@@ -133,8 +144,14 @@ function fetchChecks(
 	prId: number,
 	cwd: string,
 	requiredOnly: boolean,
+	signal?: AbortSignal,
 ): Promise<GhResult<CheckRun[]>> {
-	return ghJson<CheckRun[]>(buildGhArgs(prId, requiredOnly), cwd);
+	return ghJson<CheckRun[]>(
+		buildGhArgs(prId, requiredOnly),
+		cwd,
+		undefined,
+		signal,
+	);
 }
 
 function logFilePath(prId: number): string {
@@ -151,8 +168,53 @@ async function writeLog(
 	await writeFile(filePath, JSON.stringify(summary, null, 2), "utf8");
 }
 
-function sleep(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Sleep for `ms`, settling early when `signal` aborts.
+ */
+export function sleepAbortable(
+	ms: number,
+	signal?: AbortSignal,
+): Promise<void> {
+	return new Promise<void>((resolve) => {
+		let isSettled = false;
+		function settle(): void {
+			if (isSettled) return;
+			isSettled = true;
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}
+		const onAbort = () => settle();
+		const timer = setTimeout(settle, ms);
+		if (signal?.aborted) {
+			settle();
+			return;
+		}
+		signal?.addEventListener("abort", onAbort);
+	});
+}
+
+function backgroundWatchHint(prId: number): string {
+	return (
+		"Long CI? Wait in the background instead: bash_bg with `gh pr checks " +
+		`${prId} --watch --interval 30\`, then re-run gh_pr_checks for the final summary.`
+	);
+}
+
+function cancelledWithoutChecksResult(
+	prId: number,
+	details: PrChecksDetails,
+): { content: Array<{ type: "text"; text: string }>; details: PrChecksDetails } {
+	details.cancelled = true;
+	const text = [
+		`PR #${prId}: cancelled before any check data was fetched.`,
+		CANCELLED_NOTICE,
+		backgroundWatchHint(prId),
+	].join("\n");
+	return {
+		content: [{ type: "text", text }],
+		details,
+	};
 }
 
 interface WatchOptions {
@@ -163,16 +225,26 @@ interface WatchOptions {
 	timeoutSeconds: number;
 	intervalSeconds: number;
 	initialSummary: CheckSummary;
+	signal?: AbortSignal;
 }
 
-async function watchChecks(
-	options: WatchOptions,
-): Promise<{ summary: CheckSummary; timedOut: boolean; pollError?: string }> {
+interface WatchResult {
+	summary: CheckSummary;
+	timedOut: boolean;
+	cancelled?: boolean;
+	pollError?: string;
+}
+
+async function watchChecks(options: WatchOptions): Promise<WatchResult> {
 	const deadline = Date.now() + options.timeoutSeconds * 1000;
 	let summary = options.initialSummary;
 	let timedOut = false;
 
 	while (!summary.all_complete) {
+		if (options.signal?.aborted) {
+			return { summary, timedOut, cancelled: true };
+		}
+
 		if (Date.now() >= deadline) {
 			timedOut = true;
 			break;
@@ -182,14 +254,21 @@ async function watchChecks(
 			break;
 		}
 
-		await sleep(options.intervalSeconds * 1000);
+		await sleepAbortable(options.intervalSeconds * 1000, options.signal);
+		if (options.signal?.aborted) {
+			return { summary, timedOut, cancelled: true };
+		}
 
 		const poll = await fetchChecks(
 			options.prId,
 			options.cwd,
 			options.requiredOnly,
+			options.signal,
 		);
 		if (!poll.ok) {
+			if (options.signal?.aborted) {
+				return { summary, timedOut, cancelled: true };
+			}
 			return { summary, timedOut, pollError: poll.error };
 		}
 
@@ -231,11 +310,13 @@ export function registerGhPrChecksTool(pi: ExtensionAPI): void {
 		description:
 			"Run `gh pr checks` for a pull request and summarize the status of all " +
 			"CI checks. When watch=true, polls until every check completes or the timeout " +
-			"elapses. Writes a timestamped JSON log of the final summary.",
+			"elapses; the watch is cancellable with Esc and returns the last known state. " +
+			"Writes a timestamped JSON log of the final summary.",
 		promptSnippet: "Wait for and summarize GitHub PR CI check statuses",
 		promptGuidelines: [
 			"Use gh_pr_checks after pushing a branch to see whether CI is green",
-			"Set watch=true to poll until checks finish (default timeout 15 minutes)",
+			"Set watch=true to poll until checks finish (default timeout 15 minutes); Esc cancels the watch and returns the last known state",
+			"For long CI runs, prefer waiting in a background `gh pr checks <pr_id> --watch` job via bash_bg, then re-run gh_pr_checks for the final summary",
 			"The tool returns a summary with passed, failed, pending, and skipped counts",
 			"Check the `link` field for links to failing job logs",
 		],
@@ -264,13 +345,13 @@ export function registerGhPrChecksTool(pi: ExtensionAPI): void {
 			timeout_seconds: Type.Optional(
 				Type.Number({
 					description:
-						"Maximum seconds to wait when watching (default 900 = 15 minutes)",
+						"Maximum seconds to wait when watching (default 900 = 15 minutes, max 3600)",
 					default: 900,
 				}),
 			),
 			interval_seconds: Type.Optional(
 				Type.Number({
-					description: "Polling interval in seconds when watching",
+					description: "Polling interval in seconds when watching (min 10)",
 					default: 30,
 				}),
 			),
@@ -282,7 +363,7 @@ export function registerGhPrChecksTool(pi: ExtensionAPI): void {
 			),
 		}),
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const cwd =
 				(params.cwd as string | undefined) ?? ctx?.cwd ?? process.cwd();
 			const prId = params.pr_id as number;
@@ -290,10 +371,19 @@ export function registerGhPrChecksTool(pi: ExtensionAPI): void {
 			const requiredOnly =
 				(params.required_only as boolean | undefined) ?? false;
 			const failFast = (params.fail_fast as boolean | undefined) ?? false;
-			const timeoutSeconds =
-				(params.timeout_seconds as number | undefined) ?? 900;
-			const intervalSeconds =
-				(params.interval_seconds as number | undefined) ?? 30;
+			const timeoutSeconds = Math.min(
+				MAX_TIMEOUT_SECONDS,
+				Math.max(
+					MIN_TIMEOUT_SECONDS,
+					(params.timeout_seconds as number | undefined) ??
+						DEFAULT_TIMEOUT_SECONDS,
+				),
+			);
+			const intervalSeconds = Math.max(
+				MIN_INTERVAL_SECONDS,
+				(params.interval_seconds as number | undefined) ??
+					DEFAULT_INTERVAL_SECONDS,
+			);
 
 			const details: PrChecksDetails = {
 				pr_id: prId,
@@ -304,8 +394,15 @@ export function registerGhPrChecksTool(pi: ExtensionAPI): void {
 				interval_seconds: intervalSeconds,
 			};
 
-			const repoResult = await getRepoInfo(cwd);
+			if (signal?.aborted) {
+				return cancelledWithoutChecksResult(prId, details);
+			}
+
+			const repoResult = await getRepoInfo(cwd, signal);
 			if (!repoResult.ok) {
+				if (signal?.aborted) {
+					return cancelledWithoutChecksResult(prId, details);
+				}
 				details.error = repoResult.error;
 				return {
 					content: [
@@ -320,8 +417,11 @@ export function registerGhPrChecksTool(pi: ExtensionAPI): void {
 			}
 			details.repo = `${repoResult.data.owner}/${repoResult.data.repo}`;
 
-			const initial = await fetchChecks(prId, cwd, requiredOnly);
+			const initial = await fetchChecks(prId, cwd, requiredOnly, signal);
 			if (!initial.ok) {
+				if (signal?.aborted) {
+					return cancelledWithoutChecksResult(prId, details);
+				}
 				details.error = initial.error;
 				return {
 					content: [
@@ -346,7 +446,12 @@ export function registerGhPrChecksTool(pi: ExtensionAPI): void {
 					timeoutSeconds,
 					intervalSeconds,
 					initialSummary: summary,
+					signal,
 				});
+
+				if (watchResult.cancelled) {
+					details.cancelled = true;
+				}
 
 				if (watchResult.pollError) {
 					details.error = watchResult.pollError;
@@ -374,11 +479,21 @@ export function registerGhPrChecksTool(pi: ExtensionAPI): void {
 			details.timed_out = summary.timed_out;
 
 			const summaryText = buildSummaryText(prId, summary, timeoutSeconds);
-			const text = `${summaryText}\nLog: ${logPath}`;
+			const textLines = [summaryText];
+			const shouldHintBackgroundWatch =
+				details.cancelled || (summary.timed_out && summary.pending > 0);
+			if (details.cancelled) {
+				textLines.push(CANCELLED_NOTICE);
+			}
+			if (shouldHintBackgroundWatch) {
+				textLines.push(backgroundWatchHint(prId));
+			}
+			textLines.push(`Log: ${logPath}`);
 
-			const hasError = summary.failed > 0 || summary.timed_out;
+			const hasError =
+				!details.cancelled && (summary.failed > 0 || summary.timed_out);
 			return {
-				content: [{ type: "text", text }],
+				content: [{ type: "text", text: textLines.join("\n") }],
 				isError: hasError,
 				details,
 			};
@@ -406,6 +521,14 @@ export function registerGhPrChecksTool(pi: ExtensionAPI): void {
 			if (details?.error) {
 				return new Text(
 					theme.fg("error", "✗ ") + theme.fg("muted", details.error),
+					0,
+					0,
+				);
+			}
+			if (details?.cancelled) {
+				return new Text(
+					theme.fg("warning", "⊘ ") +
+						theme.fg("muted", `PR #${details?.pr_id} cancelled`),
 					0,
 					0,
 				);

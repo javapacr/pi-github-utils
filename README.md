@@ -8,7 +8,7 @@ GitHub PR review utilities for the [pi coding agent](https://github.com/earendil
 |------|-------------|
 | `gh_get_pr_comments` | Fetch PR review comments from GitHub and write them to a JSONL file. Each line is one review thread with an empty `notes` field ready to be filled in. |
 | `gh_resolve_pr_comments` | Read a JSONL file (from `gh_get_pr_comments`), post replies for rows with non-empty `notes`, and resolve those threads on GitHub. |
-| `gh_pr_checks` | Run `gh pr checks` for a PR. Optionally poll (`watch=true`) until all checks complete or timeout. Returns pass/fail/pending counts and writes a JSON log. |
+| `gh_pr_checks` | Run `gh pr checks` for a PR. Optionally poll (`watch=true`) until all checks complete or timeout; Esc cancels the watch and returns the last-known state. For long CI runs, prefer a background `gh pr checks <N> --watch` job via `bash_bg`, then re-run this tool for the final summary. Returns pass/fail/pending counts and writes a JSON log. |
 
 ## Install
 

@@ -1,6 +1,6 @@
 {
   "name": "pi-github-utils",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "GitHub PR review utilities for pi — fetch/resolve review comments and monitor CI checks",
   "keywords": [
     "pi-package",

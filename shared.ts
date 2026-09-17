@@ -34,17 +34,21 @@ export type GhResult<T> = GhSuccess<T> | GhError;
 
 /**
  * Run a `gh` CLI command and return parsed JSON or an error.
+ *
+ * When `signal` is provided, aborting it kills the child `gh` process.
  */
 export async function ghJson<T>(
 	args: string[],
 	cwd: string,
 	timeoutMs = 30_000,
+	signal?: AbortSignal,
 ): Promise<GhResult<T>> {
 	try {
 		const { stdout, stderr } = await execFileAsync("gh", args, {
 			cwd,
 			timeout: timeoutMs,
 			env: { ...process.env },
+			signal,
 		});
 		if (stderr?.trim() && !stdout.trim()) {
 			return { ok: false, error: stderr.trim() };
@@ -89,10 +93,15 @@ export async function ghGraphQL<T>(
 /**
  * Discover the current repository owner/name from the working directory.
  */
-export async function getRepoInfo(cwd: string): Promise<GhResult<RepoInfo>> {
+export async function getRepoInfo(
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<GhResult<RepoInfo>> {
 	const result = await ghJson<{ owner: { login: string }; name: string }>(
 		["repo", "view", "--json", "owner,name"],
 		cwd,
+		undefined,
+		signal,
 	);
 	if (!result.ok) return result;
 	return {
