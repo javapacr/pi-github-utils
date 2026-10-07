@@ -11,6 +11,9 @@
  *     mutation is attempted; these rows are reported as `replied`.
  *
  * Errors on one row never abort the batch (per-row error isolation).
+ * Esc/abort is honoured between rows only: a row already in flight finishes
+ * (reply + resolve) so no thread is left replied-but-unresolved by the abort,
+ * and mutations are never killed mid-request (their outcome would be unknown).
  */
 
 import { readFile } from "node:fs/promises";
@@ -105,6 +108,8 @@ export interface ResolvePrCommentsDetails {
 	replied_count: number;
 	skipped_malformed?: string[];
 	results?: ResolutionResult[];
+	/** True when Esc/abort stopped the batch before every row was processed. */
+	cancelled?: boolean;
 	error?: string;
 }
 
@@ -295,8 +300,17 @@ export function registerGhResolvePrCommentsTool(pi: ExtensionAPI): void {
 				replied_count: 0,
 			};
 
-			const repoResult = await getRepoInfo(cwd);
+			const repoResult = await getRepoInfo(cwd, signal);
 			if (!repoResult.ok) {
+				if (signal?.aborted) {
+					details.cancelled = true;
+					return {
+						content: [
+							{ type: "text", text: "Cancelled before any row was processed." },
+						],
+						details,
+					};
+				}
 				details.error = repoResult.error;
 				return {
 					content: [
@@ -355,6 +369,7 @@ export function registerGhResolvePrCommentsTool(pi: ExtensionAPI): void {
 				});
 			}
 			details.results = results;
+			if (aborted) details.cancelled = true;
 
 			const errorLines = results
 				.filter((r) => r.error)
@@ -376,7 +391,9 @@ export function registerGhResolvePrCommentsTool(pi: ExtensionAPI): void {
 					? [`Skipped ${details.skipped_malformed.length} malformed line(s)`]
 					: []),
 				...(aborted
-					? [`Aborted after ${results.length} row(s) — remaining rows unprocessed`]
+					? [
+							`Cancelled after ${results.length} of ${toProcess.length} row(s) — remaining rows unprocessed; before re-running with the same file, clear the notes of the rows already done (see results) or their replies are posted twice`,
+						]
 					: []),
 				...(errorLines.length > 0 ? ["", "Errors:", ...errorLines] : []),
 			];
@@ -404,6 +421,17 @@ export function registerGhResolvePrCommentsTool(pi: ExtensionAPI): void {
 					? details.error
 					: `${details?.errors ?? 0} processing error(s)`;
 				return new Text(theme.fg("error", "✗ ") + theme.fg("muted", text), 0, 0);
+			}
+			if (details?.cancelled) {
+				return new Text(
+					theme.fg("warning", "⊘ ") +
+						theme.fg(
+							"muted",
+							`cancelled — ${details.resolved_count} resolved + ${details.replied_count} replied before abort`,
+						),
+					0,
+					0,
+				);
 			}
 			const preview = expanded
 				? `Resolved ${details?.resolved_count ?? 0} thread(s), replied ${details?.replied_count ?? 0} PR comment(s) from ${details?.file ?? ""}`

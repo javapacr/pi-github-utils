@@ -30,6 +30,10 @@ import {
 const PAGE_SIZE = 100;
 const MAX_PAGES = 20;
 
+const CANCELLED_ERROR = "cancelled";
+const CANCELLED_NOTICE =
+	"Export cancelled before completion (Esc/abort) — no file written.";
+
 export type CommentKind = "inline" | "pr";
 export type CommentKindParam = CommentKind | "all";
 
@@ -197,6 +201,7 @@ export interface GetPrCommentsDetails {
 	count?: number;
 	inline_count?: number;
 	pr_count?: number;
+	cancelled?: boolean;
 	error?: string;
 }
 
@@ -206,6 +211,7 @@ async function fetchComments(
 	pr: number,
 	kind: CommentKindParam,
 	cwd: string,
+	signal?: AbortSignal,
 ): Promise<
 	GhResult<{
 		prId: string | null;
@@ -224,6 +230,7 @@ async function fetchComments(
 	let commentsDone = kind === "inline";
 
 	for (;;) {
+		if (signal?.aborted) return { ok: false, error: CANCELLED_ERROR };
 		const variables: Record<string, string | number> = { owner, repo, pr };
 		if (!threadsDone && threadCursor) variables.threadCursor = threadCursor;
 		if (!commentsDone && commentCursor) variables.commentCursor = commentCursor;
@@ -233,8 +240,12 @@ async function fetchComments(
 			variables,
 			cwd,
 			["pr"],
+			undefined,
+			signal,
 		);
-		if (!result.ok) return result;
+		if (!result.ok) {
+			return signal?.aborted ? { ok: false, error: CANCELLED_ERROR } : result;
+		}
 
 		const pullRequest = result.data.data.repository.pullRequest;
 		if (prId === null && pullRequest.id) prId = pullRequest.id;
@@ -395,7 +406,7 @@ export function registerGhGetPrCommentsTool(pi: ExtensionAPI): void {
 			),
 		}),
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const cwd = (params.cwd as string | undefined) ?? ctx?.cwd ?? process.cwd();
 			const status = params.status as string;
 			const prId = params.pr_id as number;
@@ -425,8 +436,18 @@ export function registerGhGetPrCommentsTool(pi: ExtensionAPI): void {
 				};
 			}
 
-			const repoResult = await getRepoInfo(cwd);
+			const cancelledResult = () => {
+				details.cancelled = true;
+				return {
+					content: [{ type: "text" as const, text: CANCELLED_NOTICE }],
+					details,
+				};
+			};
+			if (signal?.aborted) return cancelledResult();
+
+			const repoResult = await getRepoInfo(cwd, signal);
 			if (!repoResult.ok) {
+				if (signal?.aborted) return cancelledResult();
 				details.error = repoResult.error;
 				return {
 					content: [
@@ -443,8 +464,16 @@ export function registerGhGetPrCommentsTool(pi: ExtensionAPI): void {
 			const { owner, repo } = repoResult.data;
 			details.repo = `${owner}/${repo}`;
 
-			const fetchResult = await fetchComments(owner, repo, prId, kind, cwd);
+			const fetchResult = await fetchComments(
+				owner,
+				repo,
+				prId,
+				kind,
+				cwd,
+				signal,
+			);
 			if (!fetchResult.ok) {
+				if (signal?.aborted) return cancelledResult();
 				details.error = fetchResult.error;
 				return {
 					content: [
@@ -526,8 +555,16 @@ export function registerGhGetPrCommentsTool(pi: ExtensionAPI): void {
 					0,
 				);
 			}
+			if (details?.cancelled) {
+				return new Text(
+					theme.fg("warning", "⊘ ") +
+						theme.fg("muted", `PR #${details.pr_id} export cancelled`),
+					0,
+					0,
+				);
+			}
 			const preview = expanded
-				? `Wrote ${details?.count ?? 0} entry/entries to ${details?.file_path ?? ""}`
+				? `Wrote ${details?.count ?? 0} entry/entries (${details?.inline_count ?? 0} inline, ${details?.pr_count ?? 0} PR-level) to ${details?.file_path ?? ""}`
 				: `${details?.count ?? 0} entries → ${details?.file_path ?? ""}`;
 			return new Text(theme.fg("success", "✓ ") + theme.fg("dim", preview), 0, 0);
 		},
