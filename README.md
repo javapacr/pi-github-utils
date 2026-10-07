@@ -101,16 +101,16 @@ GitHub's GraphQL API offers no server-side resolution filter, so `status=unresol
 | `url` | comment URL | comment URL |
 | `notes` | `""` — fill to process | `""` — fill to process |
 
-Example `inline` row:
+Example `inline` row (from vercel/next.js#80410, bodies truncated):
 
 ```json
-{"kind":"inline","thread_id":"PRRT_kwDODAtoOs5PseGb","subject_id":null,"comment_id":2607545536,"comment_node_id":"PRRC_kwDODAtoOs5J0Z8H","commenter":"huozhi","commenter_id":"huozhi","body":"Could you add an example for this?","path":"examples/with-clerk/app/route.ts","line":29,"original_line":29,"created_at":"2025-09-26T02:50:21Z","url":"https://github.com/vercel/next.js/pull/80410#discussion_r2607545536","notes":""}
+{"kind":"inline","thread_id":"PRRT_kwDOBC3Cis5R-H2B","subject_id":null,"comment_id":2140459418,"comment_node_id":"PRRC_kwDOBC3Cis5_lNGa","commenter":"graphite-app","commenter_id":"graphite-app","body":"The `isInternalDevEndpoint` function may not correctly ident...","path":"packages/next/src/server/lib/router-utils/block-cross-site.ts","line":50,"original_line":50,"created_at":"2025-06-11T15:13:12Z","url":"https://github.com/vercel/next.js/pull/80410#discussion_r2140459418","notes":""}
 ```
 
 Example `pr` row:
 
 ```json
-{"kind":"pr","thread_id":null,"subject_id":"PR_kwDODAtoOs4BSILm","comment_id":2325444521,"comment_node_id":"IC_kwDODAtoOs5MMZ-p","commenter":"Vercel-Resume","commenter_id":"Vercel-Resume","body":"This pull request introduces a regression...","path":null,"line":null,"original_line":null,"created_at":"2025-09-26T01:44:55Z","url":"https://github.com/vercel/next.js/pull/80410#issuecomment-2325444521","notes":""}
+{"kind":"pr","thread_id":null,"subject_id":"PR_kwDOBC3Cis6aBvol","comment_id":2962611489,"comment_node_id":"IC_kwDOBC3Cis6wld0h","commenter":"ijjk","commenter_id":"ijjk","body":"## Tests Passed...","path":null,"line":null,"original_line":null,"created_at":"2025-06-11T13:00:31Z","url":"https://github.com/vercel/next.js/pull/80410#issuecomment-2962611489","notes":""}
 ```
 
 Files written by older versions of the extension have no `kind` field; `gh_resolve_pr_comments` treats such rows as `inline`.
