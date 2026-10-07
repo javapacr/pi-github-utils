@@ -74,6 +74,10 @@ export async function ghJson<T>(
  * matching GraphQL variables. By default variables use `-f` (raw string).
  * Variable names listed in `typedVariables` use `-F` so gh performs JSON
  * type conversion (e.g. "214" -> 214 for Int variables).
+ *
+ * When `signal` is provided, aborting it kills the child `gh` process. Pass
+ * it for read-only queries only — killing a mutation in flight leaves its
+ * outcome unknown.
  */
 export async function ghGraphQL<T>(
 	query: string,
@@ -81,13 +85,14 @@ export async function ghGraphQL<T>(
 	cwd: string,
 	typedVariables: string[] = [],
 	timeoutMs = 30_000,
+	signal?: AbortSignal,
 ): Promise<GhResult<T>> {
 	const args = ["api", "graphql", "-f", `query=${query}`];
 	for (const [key, value] of Object.entries(variables)) {
 		const flag = typedVariables.includes(key) ? "-F" : "-f";
 		args.push(flag, `${key}=${String(value)}`);
 	}
-	return ghJson<T>(args, cwd, timeoutMs);
+	return ghJson<T>(args, cwd, timeoutMs, signal);
 }
 
 /**
