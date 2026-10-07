@@ -65,6 +65,13 @@ Processing semantics per row with non-empty `notes`:
 - `kind: "pr"` — PR-level comments have no resolvable thread. The notes are posted as a **new PR-level comment** (GraphQL `addComment` on the PR node id), prefixed with a reply marker (`> replying to @<author>'s comment (<url>)`) so the reply is traceable. These rows are reported as `replied`, never `resolved`.
 - Rows with empty `notes` are skipped entirely.
 - Errors on one row do not abort the batch; the summary reports `Resolved threads`, `Replied PR comments`, and `Errors` separately.
+- Lines that are not valid JSON objects, or carry a wrong-typed `notes`/`thread_id`/`subject_id` or a `kind` other than `"inline"`/`"pr"`, are skipped and listed as malformed.
+- Replies are not deduplicated: re-running the same file posts every non-empty `notes` again. Clear the notes of rows already handled before re-running.
+
+### Cancellation (Esc)
+
+- `gh_get_pr_comments` stops at the next page request (the in-flight `gh` call is killed) and returns a cancelled result; no file is written.
+- `gh_resolve_pr_comments` stops between rows: the row in flight finishes (reply + resolve), and mutations are never killed mid-request. The summary reports how many rows ran; `details.results` lists them.
 
 ### `status` vs `kind` filters
 
@@ -75,7 +82,7 @@ GitHub's GraphQL API offers no server-side resolution filter, so `status=unresol
 
 ## JSONL format
 
-`gh_get_pr_comments` writes one JSON object per line with a uniform flat schema (fields not applicable to a kind are `null`):
+`gh_get_pr_comments` writes to `<agent dir>/tmp/gh/pr-comments/pr-<N>-<status>-<kind>-<timestamp>-comments.jsonl`, where `<agent dir>` is `$PI_CODING_AGENT_DIR` (default `~/.pi/agent`). Versions before 0.3.0 used a `.json` extension and no `<kind>` segment. The file holds one JSON object per line with a uniform flat schema (fields not applicable to a kind are `null`):
 
 | Field | `inline` (review thread root) | `pr` (PR-level comment) |
 |-------|-------------------------------|--------------------------|
