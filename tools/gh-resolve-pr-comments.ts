@@ -142,6 +142,10 @@ async function readJsonl(filePath: string): Promise<JsonlReadResult> {
 			malformed.push(`line ${lineNo}: 'notes' must be a string`);
 			return;
 		}
+		if (row.kind !== undefined && row.kind !== "inline" && row.kind !== "pr") {
+			malformed.push(`line ${lineNo}: 'kind' must be "inline" or "pr"`);
+			return;
+		}
 		for (const field of ["thread_id", "subject_id"] as const) {
 			const value = row[field];
 			if (value !== undefined && value !== null && typeof value !== "string") {

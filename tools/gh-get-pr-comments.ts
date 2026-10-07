@@ -252,14 +252,14 @@ async function fetchComments(
 
 		if (pullRequest.reviewThreads) {
 			threadPages += 1;
-			if (threadPages > MAX_PAGES) {
-				return {
-					ok: false,
-					error: `Review threads exceed the pagination safety cap of ${MAX_PAGES} pages (${PAGE_SIZE} per page) — refusing to silently truncate.`,
-				};
-			}
 			threads.push(...pullRequest.reviewThreads.nodes);
 			if (pullRequest.reviewThreads.pageInfo.hasNextPage) {
+				if (threadPages >= MAX_PAGES) {
+					return {
+						ok: false,
+						error: `Review threads exceed the pagination safety cap of ${MAX_PAGES} pages (${PAGE_SIZE} per page) — refusing to silently truncate.`,
+					};
+				}
 				threadCursor = pullRequest.reviewThreads.pageInfo.endCursor;
 			} else {
 				threadCursor = null;
@@ -269,14 +269,14 @@ async function fetchComments(
 
 		if (pullRequest.comments) {
 			commentPages += 1;
-			if (commentPages > MAX_PAGES) {
-				return {
-					ok: false,
-					error: `PR-level comments exceed the pagination safety cap of ${MAX_PAGES} pages (${PAGE_SIZE} per page) — refusing to silently truncate.`,
-				};
-			}
 			prComments.push(...pullRequest.comments.nodes);
 			if (pullRequest.comments.pageInfo.hasNextPage) {
+				if (commentPages >= MAX_PAGES) {
+					return {
+						ok: false,
+						error: `PR-level comments exceed the pagination safety cap of ${MAX_PAGES} pages (${PAGE_SIZE} per page) — refusing to silently truncate.`,
+					};
+				}
 				commentCursor = pullRequest.comments.pageInfo.endCursor;
 			} else {
 				commentCursor = null;
